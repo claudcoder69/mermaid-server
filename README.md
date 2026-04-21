@@ -1,37 +1,56 @@
 # mermaid-server
 
-Use mermaid-js to generate diagrams in a HTTP endpoint.
+An HTTP server that renders [Mermaid](https://mermaid.js.org/) diagrams by
+wrapping [`@mermaid-js/mermaid-cli`](https://github.com/mermaid-js/mermaid-cli).
 
-While this currently serves the diagrams via HTTP, it could easily be manipulated to server diagrams via other means.
-
-## Basic usage
+## Running
 
 ### Docker
 
-Run the container:
 ```
-docker run -d --name mermaid-server -p 80:80 tomwright/mermaid-server:latest
-```
-
-### Manually as a go command
-
-Start the HTTP server:
-```
-go run cmd/app/main.go --mermaid=./mermaidcli/node_modules/.bin/mmdc --in=./in --out=./out
+docker run -d --name mermaid-server -p 8080:8080 tomwright/mermaid-server:latest
 ```
 
-### Diagram creation
+### Locally
 
-Use the query param 'type' to change between 'png' and 'svg' defaults to 'svg'.
+```
+cd mermaidcli && npm install && cd ..
+go run ./cmd/app \
+    --mermaid=./mermaidcli/node_modules/.bin/mmdc \
+    --in=./in \
+    --out=./out
+```
+
+### Flags
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--mermaid` | (required) | Path to the `mmdc` executable. |
+| `--in` | (required) | Directory used to stage input `.mmd` files. |
+| `--out` | (required) | Directory used for generated images. |
+| `--addr` | `:8080` | Address the HTTP server listens on. |
+| `--puppeteer` | `""` | Optional path to a puppeteer config file. |
+| `--allow-all-origins` | `false` | Enable permissive CORS (`Access-Control-Allow-Origin: *`) and preflight handling. |
+
+## API
+
+### `GET /health`
+
+Returns `200 OK` with body `ok`. Used for container health checks.
+
+### `GET|POST /generate`
+
+Generates a diagram. The `type` query parameter controls the output format and
+may be `svg` (default) or `png`.
 
 #### POST
 
-Send a CURL request to generate a diagram via `POST`:
-```
-curl --location --request POST 'http://localhost:80/generate' \
---header 'Content-Type: text/plain' \
---data-raw 'graph LR
+Send the Mermaid source as the request body:
 
+```
+curl --location --request POST 'http://localhost:8080/generate' \
+    --header 'Content-Type: text/plain' \
+    --data-raw 'graph LR
     A-->B
     B-->C
     C-->D
@@ -39,16 +58,19 @@ curl --location --request POST 'http://localhost:80/generate' \
 '
 ```
 
+Request bodies are limited to 1 MiB.
+
 #### GET
 
-Send a CURL request to generate a diagram via `GET`... send in url encoded data under the `data` query param:
+Send URL-encoded Mermaid source under the `data` query parameter:
+
 ```
-curl --location --request GET 'http://localhost:80/generate?data=graph%20LR%0A%0A%20%20%20%20A--%3EB%0A%20%20%20%20B--%3EC%0A%20%20%20%20C--%3ED%0A%20%20%20%20C--%3EF%0A'
+curl --location --request GET 'http://localhost:8080/generate?data=graph%20LR%0A%0A%20%20%20%20A--%3EB%0A%20%20%20%20B--%3EC%0A%20%20%20%20C--%3ED%0A%20%20%20%20C--%3EF%0A'
 ```
 
 ![Example request in Postman](example.png "Example request in Postman")
 
-### Caching
+## Caching
 
-All generated diagram input and output will be cached for 1 hour. The cache time is reset whenever a cached diagram is accessed.
- 
+Generated diagrams are cached in memory and on disk for one hour after their
+last access. The cleanup loop runs every five minutes.

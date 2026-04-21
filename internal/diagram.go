@@ -1,8 +1,7 @@
 package internal
 
 import (
-	"crypto/md5"
-	"encoding/base64"
+	"crypto/sha256"
 	"encoding/hex"
 	"strings"
 	"sync"
@@ -21,18 +20,13 @@ func NewDiagram(description []byte, imgType string) *Diagram {
 
 // Diagram represents a single diagram.
 type Diagram struct {
-	// id is the ID of the Diagram
-	id string
-	// description is the description of the diagram.
+	id          string
 	description []byte
 	// Output is the filepath to the output file.
-	Output string
-	// mu is a mutex to protect the last touched value.
-	mu *sync.RWMutex
-	// lastTouched is the time that the diagram was last used.
+	Output      string
+	mu          *sync.RWMutex
 	lastTouched time.Time
-	// the type of image to generate svg or png
-	imgType string
+	imgType     string
 }
 
 // Touch updates the last touched time of the diagram.
@@ -44,22 +38,18 @@ func (d *Diagram) Touch() {
 
 // TouchedInDuration returns true if the diagram has been touched in the given duration.
 func (d *Diagram) TouchedInDuration(duration time.Duration) bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	return time.Now().Add(-duration).Before(d.lastTouched)
 }
 
-// ID returns an ID for the diagram.
-// The ID is set from the diagram description.
+// ID returns an ID for the diagram. The ID is derived from the diagram description.
 func (d *Diagram) ID() (string, error) {
 	if d.id != "" {
 		return d.id, nil
 	}
-
-	encoded := base64.StdEncoding.EncodeToString(d.description)
-	hash := md5.Sum([]byte(encoded))
+	hash := sha256.Sum256(d.description)
 	d.id = hex.EncodeToString(hash[:]) + d.imgType
-
 	return d.id, nil
 }
 
@@ -68,7 +58,7 @@ func (d *Diagram) Description() []byte {
 	return d.description
 }
 
-// Description returns the diagram description.
+// WithDescription replaces the description and invalidates the cached ID.
 func (d *Diagram) WithDescription(description []byte) *Diagram {
 	d.description = description
 	d.id = ""

@@ -1,6 +1,9 @@
 package internal
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // DiagramCache provides the ability to cache diagram results.
 type DiagramCache interface {
@@ -25,6 +28,7 @@ func NewDiagramCache() DiagramCache {
 
 // inMemoryDiagramCache is an in-memory implementation of DiagramCache.
 type inMemoryDiagramCache struct {
+	mu          sync.RWMutex
 	idToDiagram map[string]*Diagram
 }
 
@@ -34,6 +38,8 @@ func (c *inMemoryDiagramCache) Store(diagram *Diagram) error {
 	if err != nil {
 		return fmt.Errorf("cannot get diagram ID: %w", err)
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.idToDiagram[id] = diagram
 	return nil
 }
@@ -44,10 +50,10 @@ func (c *inMemoryDiagramCache) Has(diagram *Diagram) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("cannot get diagram ID: %w", err)
 	}
-	if d, ok := c.idToDiagram[id]; ok && d != nil {
-		return true, nil
-	}
-	return false, nil
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	d, ok := c.idToDiagram[id]
+	return ok && d != nil, nil
 }
 
 // Get returns a cached version of the given diagram description.
@@ -56,6 +62,8 @@ func (c *inMemoryDiagramCache) Get(diagram *Diagram) (*Diagram, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if d, ok := c.idToDiagram[id]; ok && d != nil {
 		return d, nil
 	}
@@ -64,11 +72,11 @@ func (c *inMemoryDiagramCache) Get(diagram *Diagram) (*Diagram, error) {
 
 // GetAll returns all of the cached diagrams.
 func (c *inMemoryDiagramCache) GetAll() ([]*Diagram, error) {
-	res := make([]*Diagram, len(c.idToDiagram))
-	i := 0
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	res := make([]*Diagram, 0, len(c.idToDiagram))
 	for _, diagram := range c.idToDiagram {
-		res[i] = diagram
-		i++
+		res = append(res, diagram)
 	}
 	return res, nil
 }
@@ -79,9 +87,8 @@ func (c *inMemoryDiagramCache) Delete(diagram *Diagram) error {
 	if err != nil {
 		return err
 	}
-	if _, ok := c.idToDiagram[id]; ok {
-		delete(c.idToDiagram, id)
-		return nil
-	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.idToDiagram, id)
 	return nil
 }

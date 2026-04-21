@@ -1,0 +1,12 @@
+.git
+.github
+.idea
+.DS_Store
+Makefile
+README.md
+LICENSE
+example.png
+mermaidcli/node_modules
+in
+out
+*.md
