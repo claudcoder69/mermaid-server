@@ -31,19 +31,15 @@ func (s *stubGenerator) Generate(d *Diagram) error {
 
 func (s *stubGenerator) CleanUp(time.Duration) error { return nil }
 
-func newTestHandler(t *testing.T, allowAll bool) (http.Handler, *stubGenerator) {
+func newTestRouter(t *testing.T, allowAll bool) (http.Handler, *stubGenerator) {
 	t.Helper()
 	stub := &stubGenerator{payload: []byte("<svg/>"), dir: t.TempDir(), imgType: "svg"}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	var h http.Handler = generateHTTPHandler(stub, logger)
-	if allowAll {
-		h = allowAllOriginsMiddleware(h)
-	}
-	return h, stub
+	return NewRouter(logger, stub, allowAll), stub
 }
 
-func TestHandlerPOSTReturnsSVG(t *testing.T) {
-	h, _ := newTestHandler(t, false)
+func TestRouterPOSTReturnsSVG(t *testing.T) {
+	h, _ := newTestRouter(t, false)
 	req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader("graph LR\nA-->B"))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -59,8 +55,8 @@ func TestHandlerPOSTReturnsSVG(t *testing.T) {
 	}
 }
 
-func TestHandlerGETReturnsSVG(t *testing.T) {
-	h, _ := newTestHandler(t, false)
+func TestRouterGETReturnsSVG(t *testing.T) {
+	h, _ := newTestRouter(t, false)
 	u := "/generate?data=" + url.QueryEscape("graph LR\nA-->B")
 	req := httptest.NewRequest(http.MethodGet, u, nil)
 	rec := httptest.NewRecorder()
@@ -71,8 +67,8 @@ func TestHandlerGETReturnsSVG(t *testing.T) {
 	}
 }
 
-func TestHandlerRejectsUnsupportedImageType(t *testing.T) {
-	h, _ := newTestHandler(t, false)
+func TestRouterRejectsUnsupportedImageType(t *testing.T) {
+	h, _ := newTestRouter(t, false)
 	req := httptest.NewRequest(http.MethodPost, "/generate?type=gif", strings.NewReader("x"))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -81,8 +77,8 @@ func TestHandlerRejectsUnsupportedImageType(t *testing.T) {
 	}
 }
 
-func TestHandlerRejectsUnsupportedMethod(t *testing.T) {
-	h, _ := newTestHandler(t, false)
+func TestRouterRejectsUnsupportedMethod(t *testing.T) {
+	h, _ := newTestRouter(t, false)
 	req := httptest.NewRequest(http.MethodDelete, "/generate", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -91,8 +87,8 @@ func TestHandlerRejectsUnsupportedMethod(t *testing.T) {
 	}
 }
 
-func TestHandlerGETMissingData(t *testing.T) {
-	h, _ := newTestHandler(t, false)
+func TestRouterGETMissingData(t *testing.T) {
+	h, _ := newTestRouter(t, false)
 	req := httptest.NewRequest(http.MethodGet, "/generate", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -101,8 +97,8 @@ func TestHandlerGETMissingData(t *testing.T) {
 	}
 }
 
-func TestAllowAllOriginsPreflight(t *testing.T) {
-	h, _ := newTestHandler(t, true)
+func TestRouterAllowAllOriginsPreflight(t *testing.T) {
+	h, _ := newTestRouter(t, true)
 	req := httptest.NewRequest(http.MethodOptions, "/generate", nil)
 	req.Header.Set("Origin", "https://example.com")
 	rec := httptest.NewRecorder()
@@ -113,5 +109,57 @@ func TestAllowAllOriginsPreflight(t *testing.T) {
 	}
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Fatalf("Access-Control-Allow-Origin = %q", got)
+	}
+}
+
+func TestRouterHealth(t *testing.T) {
+	h, _ := newTestRouter(t, false)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if rec.Body.String() != "ok" {
+		t.Fatalf("body = %q", rec.Body.String())
+	}
+}
+
+func TestRouterOpenAPISpec(t *testing.T) {
+	h, _ := newTestRouter(t, false)
+	req := httptest.NewRequest(http.MethodGet, "/openapi.yaml", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/yaml") {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "openapi: 3.0.3") {
+		t.Fatalf("expected OpenAPI version header in body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "/generate:") || !strings.Contains(body, "/health:") {
+		t.Fatal("expected /generate and /health paths in the served spec")
+	}
+}
+
+func TestRouterDocsPage(t *testing.T) {
+	h, _ := newTestRouter(t, false)
+	req := httptest.NewRequest(http.MethodGet, "/docs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "swagger-ui") {
+		t.Fatal("docs page should reference swagger-ui")
 	}
 }
