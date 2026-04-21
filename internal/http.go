@@ -1,60 +1,91 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/tomwright/grace"
-	"github.com/tomwright/gracehttpserverrunner"
-	"io/ioutil"
-	"log"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
 
-// NewHTTPRunner returns a grace runner that runs a HTTP server.
-func NewHTTPRunner(generator Generator, allowAllOrigins bool) grace.Runner {
-	httpHandler := generateHTTPHandler(generator)
-
+// RunHTTPServer starts the HTTP server and blocks until ctx is cancelled,
+// at which point it gracefully shuts the server down.
+func RunHTTPServer(ctx context.Context, logger *slog.Logger, generator Generator, addr string, allowAllOrigins bool) error {
+	var handler http.Handler = generateHTTPHandler(generator, logger)
 	if allowAllOrigins {
-		httpHandler = allowAllOriginsMiddleware(httpHandler)
+		handler = allowAllOriginsMiddleware(handler)
 	}
 
-	r := http.NewServeMux()
-	r.Handle("/generate", httpHandler)
+	mux := http.NewServeMux()
+	mux.Handle("/generate", handler)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok")
+	})
 
-	return &gracehttpserverrunner.HTTPServerRunner{
-		Server: &http.Server{
-			Addr:    ":80",
-			Handler: r,
-		},
-		ShutdownTimeout: time.Second * 5,
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	serverErr := make(chan error, 1)
+	go func() {
+		logger.Info("http server listening", "addr", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+			return
+		}
+		serverErr <- nil
+	}()
+
+	select {
+	case <-ctx.Done():
+		logger.Info("shutting down http server")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("shutdown: %w", err)
+		}
+		return nil
+	case err := <-serverErr:
+		return err
 	}
 }
 
-// allowAllOriginsMiddleware sets appropriate CORS headers to allow requests from any origin.
+// allowAllOriginsMiddleware sets permissive CORS headers and handles preflight.
 func allowAllOriginsMiddleware(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			origin = "*"
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Vary", "Origin")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
 		}
-		w.Header().Set("Access-Control-Allow-Origin", origin)
 		h.ServeHTTP(w, r)
 	})
 }
 
-func writeJSON(rw http.ResponseWriter, value interface{}, status int) {
+func writeJSON(rw http.ResponseWriter, value any, status int) {
 	bytes, err := json.Marshal(value)
 	if err != nil {
-		panic("could not marshal value: " + err.Error())
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	rw.Header().Set("Content-Type", "application/json")
 	rw.WriteHeader(status)
-	if _, err := rw.Write(bytes); err != nil {
-		panic("could not write bytes to response: " + err.Error())
-	}
+	_, _ = rw.Write(bytes)
 }
 
 func writeImage(rw http.ResponseWriter, data []byte, status int, imgType string) error {
@@ -73,22 +104,15 @@ func writeImage(rw http.ResponseWriter, data []byte, status int, imgType string)
 	return nil
 }
 
-func writeErr(rw http.ResponseWriter, err error, status int) {
-	log.Printf("[%d] %s", status, err)
-
-	writeJSON(rw, map[string]interface{}{
-		"error": err,
-	}, status)
+func writeErr(rw http.ResponseWriter, logger *slog.Logger, err error, status int) {
+	logger.Error("request failed", "status", status, "err", err)
+	writeJSON(rw, map[string]string{"error": err.Error()}, status)
 }
 
 // URLParam is the URL parameter getDiagramFromGET uses to look for data.
 const URLParam = "data"
 
 func getDiagramFromGET(r *http.Request, imgType string) (*Diagram, error) {
-	if r.Method != http.MethodGet {
-		return nil, fmt.Errorf("expected HTTP method GET")
-	}
-
 	queryVal := strings.TrimSpace(r.URL.Query().Get(URLParam))
 	if queryVal == "" {
 		return nil, fmt.Errorf("missing data")
@@ -97,79 +121,62 @@ func getDiagramFromGET(r *http.Request, imgType string) (*Diagram, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not read query param: %s", err)
 	}
-
-	// Create a diagram from the description
-	d := NewDiagram([]byte(data), imgType)
-	return d, nil
+	return NewDiagram([]byte(data), imgType), nil
 }
 
 func getDiagramFromPOST(r *http.Request, imgType string) (*Diagram, error) {
-	if r.Method != http.MethodPost {
-		return nil, fmt.Errorf("expected HTTP method POST")
-	}
-	// Get description from request body
-	bytes, err := ioutil.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("could not read body: %s", err)
 	}
-
-	// Create a diagram from the description
-	d := NewDiagram(bytes, imgType)
-	return d, nil
+	return NewDiagram(body, imgType), nil
 }
 
 const URLParamImageType = "type"
 
 // generateHTTPHandler returns a HTTP handler used to generate a diagram.
-func generateHTTPHandler(generator Generator) http.Handler {
+func generateHTTPHandler(generator Generator, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		var diagram *Diagram
-
 		imgType := r.URL.Query().Get(URLParamImageType)
-
 		switch imgType {
 		case "png", "svg":
 		case "":
 			imgType = "svg"
 		default:
-			writeErr(rw, fmt.Errorf("unsupported image type (%s) use svg or png", imgType), http.StatusBadRequest)
+			writeErr(rw, logger, fmt.Errorf("unsupported image type (%s) use svg or png", imgType), http.StatusBadRequest)
 			return
 		}
 
-		var err error
+		var (
+			diagram *Diagram
+			err     error
+		)
 		switch r.Method {
 		case http.MethodGet:
 			diagram, err = getDiagramFromGET(r, imgType)
 		case http.MethodPost:
 			diagram, err = getDiagramFromPOST(r, imgType)
 		default:
-			writeErr(rw, fmt.Errorf("unexpected HTTP method %s", r.Method), http.StatusBadRequest)
+			writeErr(rw, logger, fmt.Errorf("unexpected HTTP method %s", r.Method), http.StatusMethodNotAllowed)
 			return
 		}
 		if err != nil {
-			writeErr(rw, err, http.StatusBadRequest)
-			return
-		}
-		if diagram == nil {
-			writeErr(rw, fmt.Errorf("could not create diagram"), http.StatusInternalServerError)
+			writeErr(rw, logger, err, http.StatusBadRequest)
 			return
 		}
 
-		// Generate the diagram
 		if err := generator.Generate(diagram); err != nil {
-			writeErr(rw, fmt.Errorf("could not generate diagram: %s", err), http.StatusInternalServerError)
+			writeErr(rw, logger, fmt.Errorf("could not generate diagram: %s", err), http.StatusInternalServerError)
 			return
 		}
 
-		// Output the diagram as an SVG.
-		// We assume generate always generates an SVG at this point in time.
-		diagramBytes, err := ioutil.ReadFile(diagram.Output)
+		diagramBytes, err := os.ReadFile(diagram.Output)
 		if err != nil {
-			writeErr(rw, fmt.Errorf("could not read diagram bytes: %s", err), http.StatusInternalServerError)
+			writeErr(rw, logger, fmt.Errorf("could not read diagram bytes: %s", err), http.StatusInternalServerError)
 			return
 		}
 		if err := writeImage(rw, diagramBytes, http.StatusOK, imgType); err != nil {
-			writeErr(rw, fmt.Errorf("could not write diagram: %w", err), http.StatusInternalServerError)
+			writeErr(rw, logger, fmt.Errorf("could not write diagram: %w", err), http.StatusInternalServerError)
 		}
 	})
 }

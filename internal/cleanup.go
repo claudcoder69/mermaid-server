@@ -2,45 +2,28 @@ package internal
 
 import (
 	"context"
-	"github.com/tomwright/grace"
-	"log"
+	"log/slog"
 	"time"
 )
 
-// NewCleanupRunner returns a runner that can be used cleanup old diagrams.
-func NewCleanupRunner(generator Generator) grace.Runner {
-	return &cleanupService{
-		generator:   generator,
-		runEvery:    time.Minute * 5,
-		cleanupLast: time.Hour,
-	}
-}
+// RunCleanup periodically removes old diagrams until ctx is cancelled.
+func RunCleanup(ctx context.Context, logger *slog.Logger, generator Generator) {
+	const (
+		runEvery    = 5 * time.Minute
+		cleanupLast = time.Hour
+	)
 
-// cleanupService is a runner that is used cleanup old diagrams.
-type cleanupService struct {
-	generator   Generator
-	runEvery    time.Duration
-	cleanupLast time.Duration
-}
+	ticker := time.NewTicker(runEvery)
+	defer ticker.Stop()
 
-// Run starts the cleanup process.
-func (s *cleanupService) Run(ctx context.Context) error {
 	for {
+		if err := generator.CleanUp(cleanupLast); err != nil {
+			logger.Error("cleanup failed", "err", err)
+		}
 		select {
 		case <-ctx.Done():
-			return nil
-		default:
-		}
-
-		if err := s.generator.CleanUp(s.cleanupLast); err != nil {
-			log.Printf("error when cleaning up: %s", err.Error())
-		}
-
-		select {
-		case <-time.After(s.runEvery):
-			continue
-		case <-ctx.Done():
-			return nil
+			return
+		case <-ticker.C:
 		}
 	}
 }
