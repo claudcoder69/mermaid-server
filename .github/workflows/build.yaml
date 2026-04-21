@@ -1,32 +1,40 @@
-name: Build
+name: Docker Build
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    branches: [main, master]
+  pull_request:
 
 jobs:
-  build:
+  docker-build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Set env
-        run: echo "RELEASE_VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USER }}
-          password: ${{ secrets.DOCKER_PASS }}
-      - name: Build and push
+      - name: Build image (no push)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          push: true
-          tags: |
-            tomwright/mermaid-server:latest
-            tomwright/mermaid-server:${{ env.RELEASE_VERSION }}
+          push: false
+          load: true
+          tags: mermaid-server:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Smoke-test /health endpoint
+        run: |
+          docker run -d --name mermaid-server-ci -p 8080:8080 mermaid-server:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null; then
+              echo "health endpoint responded"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "health endpoint never came up"
+          docker logs mermaid-server-ci || true
+          exit 1
+      - name: Collect container logs on failure
+        if: failure()
+        run: docker logs mermaid-server-ci || true
