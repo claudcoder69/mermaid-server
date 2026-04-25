@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,26 +13,23 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 )
+
+//go:embed openapi.yaml
+var openapiSpec []byte
+
+//go:embed docs.html
+var docsPage []byte
 
 // RunHTTPServer starts the HTTP server and blocks until ctx is cancelled,
 // at which point it gracefully shuts the server down.
 func RunHTTPServer(ctx context.Context, logger *slog.Logger, generator Generator, addr string, allowAllOrigins bool) error {
-	var handler http.Handler = generateHTTPHandler(generator, logger)
-	if allowAllOrigins {
-		handler = allowAllOriginsMiddleware(handler)
-	}
-
-	mux := http.NewServeMux()
-	mux.Handle("/generate", handler)
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, "ok")
-	})
-
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           NewRouter(logger, generator, allowAllOrigins),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -60,6 +58,37 @@ func RunHTTPServer(ctx context.Context, logger *slog.Logger, generator Generator
 	case err := <-serverErr:
 		return err
 	}
+}
+
+// NewRouter wires the HTTP routes. Exposed so tests can hit the full router.
+func NewRouter(logger *slog.Logger, generator Generator, allowAllOrigins bool) http.Handler {
+	r := chi.NewRouter()
+	r.Use(middleware.Recoverer)
+	if allowAllOrigins {
+		r.Use(allowAllOriginsMiddleware)
+	}
+
+	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok")
+	})
+
+	r.Get("/openapi.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+		_, _ = w.Write(openapiSpec)
+	})
+
+	r.Get("/docs", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(docsPage)
+	})
+
+	gen := generateHTTPHandler(generator, logger)
+	r.Get("/generate", gen)
+	r.Post("/generate", gen)
+
+	return r
 }
 
 // allowAllOriginsMiddleware sets permissive CORS headers and handles preflight.
@@ -135,8 +164,9 @@ func getDiagramFromPOST(r *http.Request, imgType string) (*Diagram, error) {
 const URLParamImageType = "type"
 
 // generateHTTPHandler returns a HTTP handler used to generate a diagram.
-func generateHTTPHandler(generator Generator, logger *slog.Logger) http.Handler {
-	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+// Method dispatch is handled by the router; this handler assumes GET or POST.
+func generateHTTPHandler(generator Generator, logger *slog.Logger) http.HandlerFunc {
+	return func(rw http.ResponseWriter, r *http.Request) {
 		imgType := r.URL.Query().Get(URLParamImageType)
 		switch imgType {
 		case "png", "svg":
@@ -156,9 +186,6 @@ func generateHTTPHandler(generator Generator, logger *slog.Logger) http.Handler 
 			diagram, err = getDiagramFromGET(r, imgType)
 		case http.MethodPost:
 			diagram, err = getDiagramFromPOST(r, imgType)
-		default:
-			writeErr(rw, logger, fmt.Errorf("unexpected HTTP method %s", r.Method), http.StatusMethodNotAllowed)
-			return
 		}
 		if err != nil {
 			writeErr(rw, logger, err, http.StatusBadRequest)
@@ -178,5 +205,5 @@ func generateHTTPHandler(generator Generator, logger *slog.Logger) http.Handler 
 		if err := writeImage(rw, diagramBytes, http.StatusOK, imgType); err != nil {
 			writeErr(rw, logger, fmt.Errorf("could not write diagram: %w", err), http.StatusInternalServerError)
 		}
-	})
+	}
 }

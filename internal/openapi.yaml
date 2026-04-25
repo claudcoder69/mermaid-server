@@ -1,0 +1,128 @@
+openapi: 3.0.3
+info:
+  title: mermaid-server
+  description: |
+    HTTP server that renders [Mermaid](https://mermaid.js.org/) diagrams via
+    `@mermaid-js/mermaid-cli`. The REST surface is unchanged from the upstream
+    project — this spec simply documents it.
+  version: 1.1.0
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: diagrams
+    description: Render Mermaid diagrams.
+  - name: ops
+    description: Operational endpoints.
+
+paths:
+  /health:
+    get:
+      tags: [ops]
+      summary: Liveness probe
+      description: Returns `200 OK` with body `ok` when the server is running.
+      responses:
+        '200':
+          description: Server is healthy.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+
+  /generate:
+    get:
+      tags: [diagrams]
+      summary: Render a Mermaid diagram from a query parameter.
+      parameters:
+        - $ref: '#/components/parameters/DataQuery'
+        - $ref: '#/components/parameters/ImageType'
+      responses:
+        '200':
+          $ref: '#/components/responses/Diagram'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    post:
+      tags: [diagrams]
+      summary: Render a Mermaid diagram from a request body.
+      parameters:
+        - $ref: '#/components/parameters/ImageType'
+      requestBody:
+        required: true
+        description: Mermaid source as plain text. Maximum 1 MiB.
+        content:
+          text/plain:
+            schema:
+              type: string
+              example: |
+                graph LR
+                    A-->B
+                    B-->C
+                    C-->D
+                    C-->F
+      responses:
+        '200':
+          $ref: '#/components/responses/Diagram'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+components:
+  parameters:
+    DataQuery:
+      name: data
+      in: query
+      required: true
+      description: URL-encoded Mermaid diagram source.
+      schema:
+        type: string
+    ImageType:
+      name: type
+      in: query
+      required: false
+      description: Output image format.
+      schema:
+        type: string
+        enum: [svg, png]
+        default: svg
+
+  responses:
+    Diagram:
+      description: Rendered diagram.
+      content:
+        image/svg+xml:
+          schema:
+            type: string
+        image/png:
+          schema:
+            type: string
+            format: binary
+    BadRequest:
+      description: Invalid request (missing data, unsupported `type`, etc.).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServerError:
+      description: Failed to render the diagram.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
